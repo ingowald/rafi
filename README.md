@@ -1,5 +1,13 @@
 # rafi - the "RAy Forwarding Infrastructure" Library
 
+*DISCLAIMER* : this is VERY(!) "rough-and-ready" code that I wouldn't
+usually call ready to share, yet; the only reason this repo isn't
+private is that I need to share this code with collaborators; at this
+point you might think twice (or more times!) before acutally trying to
+use that code - though if you did stumble across this and you do have
+an applicatoin where this would be useful I'd love to hear about it
+fore sure..
+
 basic ideas: mpi-based infrastructure library where app can define
 what a 'ray' is, and how rays get 'forwarded' between different ranks.
 Basically, each rank can generate a wave-front of 'rays', and then
