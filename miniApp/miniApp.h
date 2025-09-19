@@ -4,16 +4,17 @@
 
 namespace miniApp {
   
-struct Ray {
-  int foo;
-};
-
-struct PerRayData {
-};
-
-struct PerLaunchData {
-  rafi::DeviceInterface<Ray> rafi;
-};
-
+  struct Ray {
+    int srcRank;
+    int srcID;
+  };
+  
+  struct PerRayData {
+  };
+  
+  struct PerLaunchData {
+    rafi::DeviceInterface<Ray> rafi;
+  };
+  
 }
 

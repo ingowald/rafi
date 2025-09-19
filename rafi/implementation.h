@@ -24,12 +24,7 @@ namespace rafi {
     ray_t    *pRaysOut     = 0;
     int2     *pDestOut     = 0;
     int       numReserved  = 0;
-    struct {
-      MPI_Comm comm;
-      int rank;
-      int size;
-    } mpi;
-    int *d_rankBegin = 0;
+    using HostContext<ray_t>::mpi;
   };
     
   template<typename ray_t>
@@ -48,8 +43,6 @@ namespace rafi {
 
     RAFI_CUDA_CALL(Malloc((void**)&pNumOutgoing,sizeof(int)));
     RAFI_CUDA_CALL(Memset(pNumOutgoing,0,sizeof(int)));
-
-    RAFI_CUDA_CALL(Malloc((void**)&d_rankBegin,mpi.size*sizeof(int)));
   }
   
   template<typename ray_t>
@@ -59,7 +52,6 @@ namespace rafi {
     RAFI_CUDA_CALL_NOTHROW(Free(pRaysIn));
     RAFI_CUDA_CALL_NOTHROW(Free(pRaysOut));
     RAFI_CUDA_CALL_NOTHROW(Free(pDestOut));
-    RAFI_CUDA_CALL_NOTHROW(Free(d_rankBegin));
   }
   
   template<typename ray_t>
@@ -135,6 +127,8 @@ namespace rafi {
     RAFI_CUDA_CALL(Memcpy(&numOutgoing,pNumOutgoing,sizeof(int),cudaMemcpyDefault));
     RAFI_CUDA_SYNC_CHECK();
 
+    PING; PRINT(numOutgoing);
+    
     // ------------------------------------------------------------------
     // sort rayID:destRank array
     // ------------------------------------------------------------------
@@ -179,7 +173,7 @@ namespace rafi {
     std::vector<int> begin(mpi.size);
     int *d_begin = 0;
     RAFI_CUDA_CALL(Malloc((void **)&d_begin, mpi.size*sizeof(int)));
-    RAFI_CUDA_CALL(Memset((void **)&d_begin, -1, mpi.size*sizeof(int)));
+    RAFI_CUDA_CALL(Memset((void *)d_begin, -1, mpi.size*sizeof(int)));
     {
       int bs = 1024;
       int nb = divRoundUp(numOutgoing,bs);
