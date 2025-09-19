@@ -2,9 +2,13 @@
 
 #include "rafi/rafi.h"
 #include "rafi/cuda_check.h"
+#include "rafi/mpi_check.h"
+#include <cub/cub.cuh>
 
 namespace rafi {
 
+  inline int divRoundUp(int a, int b) { return (a+b-1)/b; }
+  
   template<typename ray_t>
   struct RafiImpl : public HostContext<ray_t>
   {
@@ -98,6 +102,30 @@ namespace rafi {
   }
 
   template<typename ray_t>
+  __global__
+  void rearrangeRays(ray_t *pRaysIn, ray_t *pRaysOut,
+                     int2 *pDestSorted, int numRays)
+  {
+    int tid = threadIdx.x+blockIdx.x*blockDim.x;
+    if (tid >= numRays) return;
+    pRaysOut[tid] = pRaysIn[pDestSorted[tid].x];
+  }
+
+  __global__
+  inline void findBegin(int  *d_begin,
+                        int2 *dDestSorted,
+                        int numRays)
+  {
+    int tid = threadIdx.x+blockIdx.x*blockDim.x;
+    if (tid >= numRays) return;
+
+    if (tid == 0 ||
+        dDestSorted[tid].y != dDestSorted[tid-1].y) {
+      d_begin[dDestSorted[tid].y] = tid;
+    }
+  }
+  
+  template<typename ray_t>
   ForwardResult RafiImpl<ray_t>::forwardRays()
   {
     ForwardResult result;
@@ -140,9 +168,9 @@ namespace rafi {
     {
       int bs = 1024;
       int nb = divRoundUp(numOutgoing,bs);
-      rearrangeRays<<<nb,bs>>>(dRaysIn,dRaysOut,d_keys_out,numOutgoing);
+      rearrangeRays<<<nb,bs>>>(pRaysIn,pRaysOut,(int2*)d_keys_out,numOutgoing);
     }
-    std::swap(dRaysOut,dRaysIn);
+    std::swap(pRaysOut,pRaysIn);
     
     // ------------------------------------------------------------------
     // find where ray's offsets are, and use that to compute the
@@ -152,24 +180,33 @@ namespace rafi {
     int *d_begin = 0;
     RAFI_CUDA_CALL(Malloc((void **)&d_begin, mpi.size*sizeof(int)));
     RAFI_CUDA_CALL(Memset((void **)&d_begin, -1, mpi.size*sizeof(int)));
-    std::vector<int> end(mpi.size);
-    int *d_end = 0;
-    RAFI_CUDA_CALL(Malloc((void **)&d_end, mpi.size*sizeof(int)));
-    RAFI_CUDA_CALL(Memset((void **)&d_end, -1, mpi.size*sizeof(int)));
     {
       int bs = 1024;
       int nb = divRoundUp(numOutgoing,bs);
-      findBegin<<<nb,bs>>>(d_begin,d_end,(int2*)d_keys_out,numOutgoing);
+      findBegin<<<nb,bs>>>(d_begin,(int2*)d_keys_out,numOutgoing);
       RAFI_CUDA_CALL(Memcpy(begin.data(),d_begin,mpi.size*sizeof(int),
                             cudaMemcpyDefault));
       RAFI_CUDA_SYNC_CHECK();
     }
+    std::vector<int> end(mpi.size);
+    {
+      int curEnd = numOutgoing;
+      for (int i=mpi.size-1;i>=0;--i) {
+        end[i] = curEnd;
+        if (begin[i] != -1)
+          curEnd = begin[i];
+      }
+    }
+    {
+      int curBegin = 0;
+      for (int i=0;i<mpi.size;i++) {
+        begin[i] = curBegin;
+        curBegin = end[i];
+      }
+    }
     std::vector<int> count(mpi.size);
     for (int i=0;i<mpi.size;i++)
-      count[i]
-        = (begin[i] == -1)
-        ? 0
-        : (end[i] - begin[i]);
+      count[i] = end[i] - begin[i];
     
     // ------------------------------------------------------------------
     // exchange ray counts
@@ -187,9 +224,9 @@ namespace rafi {
     std::vector<int> recvOffsets(mpi.size);
     std::vector<int> sendCounts(mpi.size);
     std::vector<int> sendOffsets(mpi.size);
-    RAFI_MPI_CALL(Alltoall(pRaysOut,sendCounts.data(),sendOffsets.data(),MPI_BYTE,
-                           pRaysIn,recvCounts.data(),recvOffsets.data(),MPI_BYTE,
-                           mpi.comm));
+    RAFI_MPI_CALL(Alltoallv(pRaysOut,sendCounts.data(),sendOffsets.data(),MPI_BYTE,
+                            pRaysIn,recvCounts.data(),recvOffsets.data(),MPI_BYTE,
+                            mpi.comm));
 
     // ------------------------------------------------------------------
     // swap queues
@@ -201,7 +238,6 @@ namespace rafi {
     // cleanup
     // ------------------------------------------------------------------
     RAFI_CUDA_CALL(Free(d_begin));
-    RAFI_CUDA_CALL(Free(d_end));
     RAFI_CUDA_CALL(Free(d_temp_storage));
     RAFI_CUDA_CALL(Free(d_keys_out));
     RAFI_CUDA_SYNC_CHECK();
