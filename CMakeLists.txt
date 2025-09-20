@@ -36,11 +36,18 @@ set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
 set(CMAKE_CUDA_ARCHITECTURES native)
 
-add_subdirectory(submodules/owl EXCLUDE_FROM_ALL)
-add_library(stb INTERFACE)
-target_include_directories(stb INTERFACE ${CMAKE_CURRENT_LIST_DIR}/submodules)
+if (TARGET owl::owl)
+  message("#rafi: owl target already defined, assuming it was inlcluded as a sibling project rather than availabel as subproject")
+else()
+  add_subdirectory(submodules/owl EXCLUDE_FROM_ALL)
+endif()
 
 add_subdirectory(rafi)
 
-add_subdirectory(miniApp buildDir_miniApp)
+if (NOT (${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_SOURCE_DIR}))
+  # build the mini-app only if not used as a subproject
+  add_library(stb INTERFACE)
+  target_include_directories(stb INTERFACE ${CMAKE_CURRENT_LIST_DIR}/submodules)
+  add_subdirectory(miniApp buildDir_miniApp)
+endif()
 
