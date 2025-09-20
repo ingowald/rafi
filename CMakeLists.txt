@@ -44,7 +44,7 @@ endif()
 
 add_subdirectory(rafi)
 
-if (NOT (${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_SOURCE_DIR}))
+if ((${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_SOURCE_DIR}))
   # build the mini-app only if not used as a subproject
   add_library(stb INTERFACE)
   target_include_directories(stb INTERFACE ${CMAKE_CURRENT_LIST_DIR}/submodules)
