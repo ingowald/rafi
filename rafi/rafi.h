@@ -21,12 +21,12 @@ namespace rafi {
       a valid mpi rank for the communicator being provided (though
       sending to itself is allowed */
     inline __device__
-    void emitOutgoing(ray_t ray, int destination) const;
+    void emitOutgoing(ray_t ray, int destination, bool dbg=false) const;
 
     inline __device__
     int allocateOutgoing(int numRaysToAllocate) const;
     inline __device__
-    void writeOutgoing(int rayID, ray_t ray, int destination) const;
+    void writeOutgoing(int rayID, ray_t ray, int destination, bool dbg) const;
 
     struct {
       int rank;
@@ -75,7 +75,7 @@ namespace rafi {
       in this forwarding operation AND the total number of rays
       currently in flight ACROSS ALL RANKS (which can be used for
       distributed termination). */
-    virtual ForwardResult forwardRays() = 0;
+    virtual ForwardResult forwardRays(const char *dbg) = 0;
 
     struct {
       int rank = -1;
@@ -121,17 +121,41 @@ namespace rafi {
   template<typename ray_t>
   inline __device__
   void DeviceInterface<ray_t>::emitOutgoing(const ray_t ray,
-                                            int rankThisNeedsToGetSentTo) const
+                                            int rankThisNeedsToGetSentTo,
+                                            bool dbg) const
   {
-    writeOutgoing(allocateOutgoing(1),ray,rankThisNeedsToGetSentTo);
+    if (rankThisNeedsToGetSentTo != 0 && rankThisNeedsToGetSentTo != 1)
+      printf("rankThisNeedsToGetSentTo %i\n",rankThisNeedsToGetSentTo);
+
+    int pos = allocateOutgoing(1);
+    if (dbg) { printf("emitting ray to pos %i\n",pos); }
+    writeOutgoing(pos,ray,rankThisNeedsToGetSentTo,dbg);
   }
 
   template<typename ray_t>
   inline __device__
-  void DeviceInterface<ray_t>::writeOutgoing(int rayID, ray_t ray, int destination) const
+  void DeviceInterface<ray_t>::writeOutgoing(int rayID,
+                                             ray_t ray,
+                                             int destination,
+                                             bool dbg) const
   {
+    if (rayID == 0) printf("maxout %i\n",maxNumOutgoing);
+    if (destination != 0 && destination != 1)
+      printf("writeout dest %i\n",destination);
+    if (rayID >= maxNumOutgoing) {
+      printf("queue overflow %i/%i\n",rayID,maxNumOutgoing);
+      return;
+    }
     pRaysOut[rayID] = ray;
     pDestOut[rayID] = make_int2(rayID,destination);
+    if (dbg) {
+      printf("write out pos %i, dest %i %i %lx\n",
+             rayID,
+             pDestOut[rayID].x,
+             pDestOut[rayID].y,
+             ((uint64_t*)pDestOut)[rayID]
+             );
+    }
   }
   
 #endif
