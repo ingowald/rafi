@@ -7,15 +7,31 @@
 
 namespace rafi {
 
+  /*! helper class to set active GPU for the lifetime of this class,
+      and restore it to what it was before upon destruction of this
+      class */
+  struct SetActiveGPU {
+    inline SetActiveGPU(int gpuID)
+    {
+      RAFI_CUDA_CHECK(cudaGetDevice(&savedActiveDeviceID));
+      RAFI_CUDA_CHECK(cudaSetDevice(gpuID));
+    }
+    inline ~SetActiveGPU()
+    { RAFI_CUDA_CALL_NOTHROW(SetDevice(savedActiveDeviceID)); }
+  private:
+    int savedActiveDeviceID = -1;
+  };
+  
   inline int divRoundUp(int a, int b) { return (a+b-1)/b; }
 
   template<typename ray_t>
   struct RafiImpl : public HostContext<ray_t>
   {
-    RafiImpl(MPI_Comm comm);
+    RafiImpl(MPI_Comm comm, int gpuID);
     ~RafiImpl() override;
     void resizeRayQueues(size_t maxRaysOnAnyRankAtAnyTime) override;
     void clearQueue() override {
+      SetActiveGPU forDuration(gpuID);
       cudaMemset(pNumOutgoing,0,sizeof(int));
     }
 
@@ -29,18 +45,20 @@ namespace rafi {
     unsigned *pDestRank    = 0;
     unsigned *pDestRayID   = 0;
     int       numReserved  = 0;
+    int       const gpuID;
     using HostContext<ray_t>::mpi;
   };
     
   template<typename ray_t>
-  HostContext<ray_t> *createContext(MPI_Comm comm)
+  HostContext<ray_t> *createContext(MPI_Comm comm, int gpuID)
   {
-    return new RafiImpl<ray_t>(comm);
+    return new RafiImpl<ray_t>(comm, gpuID);
   }
 
   
   template<typename ray_t>
-  RafiImpl<ray_t>::RafiImpl(MPI_Comm comm)
+  RafiImpl<ray_t>::RafiImpl(MPI_Comm comm, int gpuID)
+    : gpuID(gpuID)
   {
     mpi.comm = comm;
     MPI_Comm_rank(comm,&mpi.rank);
@@ -63,6 +81,8 @@ namespace rafi {
   template<typename ray_t>
   void RafiImpl<ray_t>::resizeRayQueues(size_t newSize)
   {
+    SetActiveGPU forDuration(gpuID);
+    
     RAFI_CUDA_CALL(Free(pRaysIn));
     pRaysIn = 0;
     RAFI_CUDA_CALL(Free(pRaysOut));
@@ -137,6 +157,7 @@ namespace rafi {
   template<typename ray_t>
   ForwardResult RafiImpl<ray_t>::forwardRays()
   {
+    SetActiveGPU forDuration(gpuID);
     int numOutgoing = 0;
     RAFI_CUDA_CALL(Memcpy(&numOutgoing,pNumOutgoing,sizeof(int),cudaMemcpyDefault));
     if (numOutgoing > 0) {
@@ -299,17 +320,13 @@ namespace rafi {
       }
     }
     
-    numIncoming = recvSum;//numOutgoing;
+    numIncoming = recvSum;
 #endif
-
-    // ------------------------------------------------------------------
-    // 
-    // ------------------------------------------------------------------
-    RAFI_CUDA_CALL(Memset(pNumOutgoing,0,sizeof(int)));
 
     // ------------------------------------------------------------------
     // cleanup
     // ------------------------------------------------------------------
+    RAFI_CUDA_CALL(Memset(pNumOutgoing,0,sizeof(int)));
     RAFI_CUDA_CALL(Free(d_begin));
 
     ForwardResult result;
@@ -327,7 +344,9 @@ namespace rafi {
 }
 
 #define RAFI_INSTANTIATE(MyRayT)                                        \
-  template rafi::HostContext<MyRayT> *rafi::createContext<MyRayT>(MPI_Comm comm);
+  template rafi::HostContext<MyRayT> *                                  \
+  rafi::createContext<MyRayT>(MPI_Comm comm,                            \
+                              int gpuID);
 
 
 

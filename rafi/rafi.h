@@ -97,7 +97,7 @@ namespace rafi {
     ranks in the given comm need to call this method, the call will
     be blocking. */
   template<typename RayT>
-  HostContext<RayT> *createContext(MPI_Comm comm);
+  HostContext<RayT> *createContext(MPI_Comm comm, int gpuID);
 
 
 
