@@ -201,7 +201,7 @@ namespace rafi {
     std::vector<int> count(mpi.size);
     for (int i=0;i<mpi.size;i++)
       count[i] = end[i] - begin[i];
-    
+
     // ------------------------------------------------------------------
     // exchange ray counts
     // ------------------------------------------------------------------
@@ -211,6 +211,29 @@ namespace rafi {
                            numRaysWeAreReceivingFrom.data(),1,MPI_INT,
                            mpi.comm));
     
+#if 1
+    std::vector<MPI_Request> requests;
+    ray_t *recvPtr = pRaysIn;
+    for (int i=0;i<mpi.size;i++) {
+      MPI_Request r;
+      int count = numRaysWeAreReceivingFrom[i];
+      if (count == 0) continue;
+      RAFI_MPI_CALL(Irecv(recvPtr,count*sizeof(ray_t),
+                          MPI_BYTE,i,0,mpi.comm,&r));
+      requests.push_back(r);
+      recvPtr += count;
+    }
+    ray_t *sendPtr = pRaysOut;
+    for (int i=0;i<mpi.size;i++) {
+      MPI_Request r;
+      int count = numRaysWeAreSendingTo[i];
+      if (count == 0) continue;
+      RAFI_MPI_CALL(Isend(sendPtr,count*sizeof(ray_t),
+                          MPI_BYTE,i,0,mpi.comm,&r));
+      requests.push_back(r);
+      recvPtr += count;
+    }
+#else
     // ------------------------------------------------------------------
     // exchange rays themselves
     // ------------------------------------------------------------------
@@ -221,7 +244,7 @@ namespace rafi {
     RAFI_MPI_CALL(Alltoallv(pRaysOut,sendCounts.data(),sendOffsets.data(),MPI_BYTE,
                             pRaysIn,recvCounts.data(),recvOffsets.data(),MPI_BYTE,
                             mpi.comm));
-
+#endif
     // ------------------------------------------------------------------
     // swap queues
     // ------------------------------------------------------------------
