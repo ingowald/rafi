@@ -116,78 +116,7 @@ namespace rafi {
     if (tid >= numRays) return;
     int rid = pDestRayID[tid];
     ray_t rayIn = pRaysIn[rid];
-    rayIn.dbg_srcRank = -1;
-    rayIn.dbg_srcIndex = -1;
-    rayIn.dbg_dstRank = pDestRank[tid];
     pRaysOut[tid] = rayIn;
-    if (rayIn.dbg) printf("(%i) dbg ray rearranged from %i to pos %i\n",
-                          rank,rid,tid);
-  }
-
-  template<typename ray_t>
-  __global__
-  void markRays(ray_t *pRays,
-                int rank,
-                int numRays)
-  {
-    int tid = threadIdx.x+blockIdx.x*blockDim.x;
-    if (tid >= numRays) return;
-    pRays[tid].dbg_srcRank = rank;
-    pRays[tid].dbg_srcIndex = tid;
-  }
-  
-  template<typename ray_t>
-  __global__
-  void checkRays(ray_t *pRays,
-                 int rank,
-                 int myRank,
-                 int numRays)
-  {
-    int tid = threadIdx.x+blockIdx.x*blockDim.x;
-    if (tid >= numRays) return;
-    auto ray = pRays[tid];
-    if (ray.dbg_srcRank != rank  ||
-        ray.dbg_dstRank != myRank ||
-        ray.dbg_srcIndex != tid) {
-      printf("(%i) funky ray: is src %i:%i, dst %i, expt: %i:%i dst %i\n",
-             rank,
-             ray.dbg_srcRank,ray.dbg_srcIndex,ray.dbg_dstRank,
-             rank,tid,myRank);
-    }
-  }
-  
-  template<typename ray_t>
-  __global__
-  void printDBG(ray_t *rays, int numRays,
-                int rank, int stage)
-  {
-    int tid = threadIdx.x+blockIdx.x*blockDim.x;
-    if (tid >= numRays) return;
-    if (rays[tid].dbg)
-      printf("(%i) *********** stage %i dbg ray at pos %i/%i\n",
-             rank,stage,tid,numRays);
-  }
-
-  __global__
-  void checkDests(int stage,
-                  unsigned *pDestRank,
-                  unsigned *pDestRayID,
-                  int numRays)
-  {
-    int tid = threadIdx.x+blockIdx.x*blockDim.x;
-    if (tid >= numRays) return;
-    int dst = pDestRank[tid];
-    int rid = pDestRayID[tid];
-    if (numRays <= 32)
-      printf("dst<%i>[%i/%i] = %i %i\n",stage,tid,numRays,dst,rid);
-    if (dst != 0 && dst != 1) {
-      printf("check<%i>[%i/%i] dst %i\n",stage,tid,numRays,dst);
-      return;
-    }
-    if (rid < 0 || rid >= numRays) {
-      printf("check<%i>[%i/%i] rid %i\n",stage,tid,numRays,rid);
-      return;
-    }
   }
 
   __global__
@@ -246,10 +175,6 @@ namespace rafi {
       RAFI_CUDA_CALL(Free(d_keys_sorted));
       RAFI_CUDA_CALL(Free(d_values_sorted));
       RAFI_CUDA_CALL(Free(d_temp_storage));
-
-      if (numOutgoing) {
-        printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,-2);
-      }
       // ------------------------------------------------------------------
       // re-arrange rays
       // ------------------------------------------------------------------
@@ -262,11 +187,6 @@ namespace rafi {
                                    numOutgoing,mpi.rank);
     
       }
-    }
-    RAFI_CUDA_SYNC_CHECK();
-    
-    if (numOutgoing) {
-      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,-1);
     }
     
     // ------------------------------------------------------------------
@@ -286,7 +206,6 @@ namespace rafi {
                             cudaMemcpyDefault));
       RAFI_CUDA_SYNC_CHECK();
     }
-    RAFI_CUDA_SYNC_CHECK();
     std::vector<int> end(mpi.size);
     {
       int curEnd = numOutgoing;
@@ -323,15 +242,11 @@ namespace rafi {
     for (int i=0;i<mpi.size;i++) {
       MPI_Request r;
       int count = numRaysWeAreReceivingFrom[i];
-      ss << "(" << mpi.rank << ") receiving " << count << " from " << i << " at ofs " << (recvPtr-pRaysIn) << std::endl;
       if (count == 0) continue;
       RAFI_MPI_CALL(Irecv(recvPtr,count*sizeof(ray_t),
                           MPI_BYTE,i,0,mpi.comm,&r));
       requests.push_back(r);
       recvPtr += count;
-    }
-    if (numOutgoing) {
-      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,0);
     }
     numIncoming = recvPtr-pRaysIn;
     
@@ -339,7 +254,6 @@ namespace rafi {
     for (int i=0;i<mpi.size;i++) {
       MPI_Request r;
       int count = numRaysWeAreSendingTo[i];
-      ss << "(" << mpi.rank << ") sending " << count << " to " << i << " from ofs " << (sendPtr-pRaysOut) << std::endl;
       if (count == 0) continue;
       RAFI_MPI_CALL(Isend(sendPtr,count*sizeof(ray_t),
                           MPI_BYTE,i,0,mpi.comm,&r));
@@ -347,7 +261,6 @@ namespace rafi {
       sendPtr += count;
     }
     assert(numOutgoing == sendPtr - pRaysOut);
-    std::cout << ss.str();
     RAFI_MPI_CALL(Waitall(requests.size(),requests.data(),MPI_STATUSES_IGNORE));
 #else
     // ------------------------------------------------------------------
@@ -363,14 +276,6 @@ namespace rafi {
       sendCounts[i] = numRaysWeAreSendingTo[i]*sizeof(ray_t);
       sendOffsets[i] = sendSum*sizeof(ray_t);
       sendSum += numRaysWeAreSendingTo[i];
-      
-      if (sendCounts[i]) {
-        int bs = 1024;
-        int nb = divRoundUp(sendCounts[i],bs);
-        if (nb)
-          markRays<<<nb,bs>>>(pRaysOut+sendOffsets[i]/sizeof(ray_t),i,
-                              sendCounts[i]/sizeof(ray_t));
-      }
     }
     
     int recvSum = 0;
@@ -380,26 +285,6 @@ namespace rafi {
       recvSum += numRaysWeAreReceivingFrom[i];
     }
     cudaMemset(pRaysIn,-1,recvSum*sizeof(ray_t));
-    
-    std::stringstream ss;
-    ss << "[" << mpi.rank << "] send/recv: send";
-    for (int i=0;i<mpi.size;i++)
-      ss << " " << numRaysWeAreSendingTo[i];
-    ss << " ; recv";
-    for (int i=0;i<mpi.size;i++)
-      ss << " " << numRaysWeAreReceivingFrom[i];
-    ss << std::endl;
-    for (int i=0;i<mpi.size;i++) {
-      ss << " - {" << mpi.rank << "->" << i << "}: " << sendCounts[i] << "@" << sendOffsets[i] << std::endl;
-      ss << " - {" << mpi.rank << "<-" << i << "}: " << recvCounts[i] << "@" << recvOffsets[i] << std::endl;
-    }
-    std::cout << ss.str();
-
-
-    if (numOutgoing) {
-      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,0);
-    }
-    
     RAFI_MPI_CALL(Alltoallv(pRaysOut,sendCounts.data(),sendOffsets.data(),MPI_BYTE,
                             pRaysIn,recvCounts.data(),recvOffsets.data(),MPI_BYTE,
                             mpi.comm));
@@ -420,9 +305,6 @@ namespace rafi {
     // ------------------------------------------------------------------
     // 
     // ------------------------------------------------------------------
-    if (numIncoming) {
-      printDBG<<<divRoundUp(numIncoming,128),128>>>(pRaysIn,numIncoming,mpi.rank,1);
-    }
     RAFI_CUDA_CALL(Memset(pNumOutgoing,0,sizeof(int)));
 
     // ------------------------------------------------------------------
@@ -439,13 +321,6 @@ namespace rafi {
                             &result.numRaysAliveAcrossAllRanks,
                             1,MPI_INT,MPI_SUM,mpi.comm));
     assert(this->numIncoming == result.numRaysInIncomingQueueThisRank);
-    printf("(%i) num incoming local %i, num active global %i\n",
-           mpi.rank,
-           result.numRaysInIncomingQueueThisRank,
-           result.numRaysAliveAcrossAllRanks);
-    // PRINT(numIncoming);
-    // PRINT(result.numRaysInIncomingQueueThisRank);
-    // PRINT(result.numRaysAliveAcrossAllRanks);
     return result;
   }
   
