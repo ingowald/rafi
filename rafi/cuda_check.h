@@ -52,7 +52,8 @@ inline void rafiRaise_impl(std::string str)
 
 #define RAFI_CUDA_SYNC_CHECK()                                           \
   {                                                                     \
-    cudaError_t rc = cudaDeviceSynchronize();                           \
+    cudaDeviceSynchronize();                                            \
+    cudaError_t rc = cudaGetLastError();                           \
     if (rc != cudaSuccess) {                                            \
       fprintf(stderr, "error (%s: line %d): %s\n",                      \
               __FILE__, __LINE__, cudaGetErrorString(rc));              \

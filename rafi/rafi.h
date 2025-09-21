@@ -43,7 +43,8 @@ namespace rafi {
       is a error and will return null */
     int maxNumOutgoing;
 
-    int2  *pDestOut;
+    unsigned  *pDestRank;
+    unsigned  *pDestRayID;
     ray_t *pRaysOut;
     ray_t *pRaysIn;
   };
@@ -64,6 +65,14 @@ namespace rafi {
       node. app guarantees that no ray will ever generate or receive
       more rays than indicates in this function */
     virtual void resizeRayQueues(size_t maxRaysOnAnyRankAtAnyTime) = 0;
+
+    /*! explicitly clear the device-side 'numOutgoing' ray counter
+        that indicates the numnber of active rays in the ray
+        queue. this usually happens automatically at the end of
+        forwardrays (so _usually_ doesn't ever have to get called),
+        but this allows for resetting the queue even if one decides to
+        _not_ forward rays */
+    virtual void clearQueue() = 0;
 
     /*! forward current set of (one-per-rank) outgoing ray queues,
       such that each ray ends up in the incoming ray queue on the
@@ -108,7 +117,9 @@ namespace rafi {
   inline __device__
   ray_t DeviceInterface<ray_t>::getIncoming(int rayID) const
   {
-    return pRaysIn[rayID];
+    auto ray = pRaysIn[rayID];
+    if (ray.dbg) printf("(%i) get dbg ray at %i\n",mpi.rank,rayID);
+    return ray;
   }
   
   template<typename ray_t>
@@ -123,15 +134,19 @@ namespace rafi {
   void DeviceInterface<ray_t>::emitOutgoing(const ray_t ray,
                                             int rankThisNeedsToGetSentTo) const
   {
-    writeOutgoing(allocateOutgoing(1),ray,rankThisNeedsToGetSentTo);
+    int pos = allocateOutgoing(1);
+    writeOutgoing(pos,ray,rankThisNeedsToGetSentTo);
   }
 
   template<typename ray_t>
   inline __device__
-  void DeviceInterface<ray_t>::writeOutgoing(int rayID, ray_t ray, int destination) const
+  void DeviceInterface<ray_t>::writeOutgoing(int rayID,
+                                             ray_t ray,
+                                             int destination) const
   {
     pRaysOut[rayID] = ray;
-    pDestOut[rayID] = make_int2(rayID,destination);
+    pDestRayID[rayID] = rayID;
+    pDestRank[rayID] = destination;
   }
   
 #endif
