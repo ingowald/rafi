@@ -10,15 +10,6 @@ namespace rafi {
   inline int divRoundUp(int a, int b) { return (a+b-1)/b; }
 
   template<typename ray_t>
-  __global__ void printDebugRays(int rank, ray_t *rays, int numRays)
-  {
-    int tid = threadIdx.x+blockIdx.x*blockDim.x;
-    if (tid >= numRays) return;
-
-    if (rays[tid].dbg) printf("[%i] !!!!!! debug ray at %i\n",rank,tid);
-  }
-  
-  template<typename ray_t>
   struct RafiImpl : public HostContext<ray_t>
   {
     RafiImpl(MPI_Comm comm);
@@ -29,7 +20,7 @@ namespace rafi {
     }
 
     DeviceInterface<ray_t> getDeviceInterface() override;
-    ForwardResult forwardRays(const char *msg) override;
+    ForwardResult forwardRays() override;
 
     int       numIncoming  = 0;
     int      *pNumOutgoing = 0;
@@ -101,7 +92,7 @@ namespace rafi {
     dd.pNumOutgoing = pNumOutgoing;
     
     /*! max number of rays reserved for outgoing ray. asking for more
-        is a error and will return null */
+      is a error and will return null */
     dd.maxNumOutgoing = numReserved;
 
     dd.pDestRayID = pDestRayID;
@@ -118,23 +109,63 @@ namespace rafi {
                      ray_t *pRaysIn, 
                      unsigned *pDestRank,
                      unsigned *pDestRayID,
-                     int numRays)
+                     int numRays,
+                     int rank)
   {
     int tid = threadIdx.x+blockIdx.x*blockDim.x;
     if (tid >= numRays) return;
-    int dst = pDestRank[tid];
     int rid = pDestRayID[tid];
-    if (dst != 0 && dst != 1) {
-      printf("dst %i (%i %f)\n",dst,dst,(const float&)dst);
-      return;
-    }
-    if (rid < 0 || rid >= numRays) {
-      printf("rid %i\n",rid);
-      return;
-    }
     ray_t rayIn = pRaysIn[rid];
-    if (rayIn.dbg) printf("rearrange WRITING debug ray at %i\n",tid);
+    rayIn.dbg_srcRank = -1;
+    rayIn.dbg_srcIndex = -1;
+    rayIn.dbg_dstRank = pDestRank[tid];
     pRaysOut[tid] = rayIn;
+    if (rayIn.dbg) printf("(%i) dbg ray rearranged from %i to pos %i\n",
+                          rank,rid,tid);
+  }
+
+  template<typename ray_t>
+  __global__
+  void markRays(ray_t *pRays,
+                int rank,
+                int numRays)
+  {
+    int tid = threadIdx.x+blockIdx.x*blockDim.x;
+    if (tid >= numRays) return;
+    pRays[tid].dbg_srcRank = rank;
+    pRays[tid].dbg_srcIndex = tid;
+  }
+  
+  template<typename ray_t>
+  __global__
+  void checkRays(ray_t *pRays,
+                 int rank,
+                 int myRank,
+                 int numRays)
+  {
+    int tid = threadIdx.x+blockIdx.x*blockDim.x;
+    if (tid >= numRays) return;
+    auto ray = pRays[tid];
+    if (ray.dbg_srcRank != rank  ||
+        ray.dbg_dstRank != myRank ||
+        ray.dbg_srcIndex != tid) {
+      printf("(%i) funky ray: is src %i:%i, dst %i, expt: %i:%i dst %i\n",
+             rank,
+             ray.dbg_srcRank,ray.dbg_srcIndex,ray.dbg_dstRank,
+             rank,tid,myRank);
+    }
+  }
+  
+  template<typename ray_t>
+  __global__
+  void printDBG(ray_t *rays, int numRays,
+                int rank, int stage)
+  {
+    int tid = threadIdx.x+blockIdx.x*blockDim.x;
+    if (tid >= numRays) return;
+    if (rays[tid].dbg)
+      printf("(%i) *********** stage %i dbg ray at pos %i/%i\n",
+             rank,stage,tid,numRays);
   }
 
   __global__
@@ -175,121 +206,70 @@ namespace rafi {
   }
   
   template<typename ray_t>
-  ForwardResult RafiImpl<ray_t>::forwardRays(const char *bla)
+  ForwardResult RafiImpl<ray_t>::forwardRays()
   {
     ForwardResult result;
 
-    RAFI_CUDA_SYNC_CHECK();
     int numOutgoing = 0;
     RAFI_CUDA_CALL(Memcpy(&numOutgoing,pNumOutgoing,sizeof(int),cudaMemcpyDefault));
-    RAFI_CUDA_SYNC_CHECK();
-
-    printf("rafi[%i] forwarding rays count=%i %s\n",mpi.rank,numOutgoing,bla);
-    if (numOutgoing > 0)
-      printDebugRays<<<divRoundUp(numOutgoing,1024),1024>>>(mpi.rank,pRaysOut,numOutgoing);
-    RAFI_CUDA_SYNC_CHECK();
-    
-    // ------------------------------------------------------------------
-    // sort rayID:destRank array
-    // ------------------------------------------------------------------
-    {
-      int bs = 1024;
-      int nb = divRoundUp(numOutgoing,bs);
-      if (nb)
-        checkDests<<<nb,bs>>>(1,pDestRank,pDestRayID,numOutgoing);
-      RAFI_CUDA_SYNC_CHECK();
-    }
-
-#if 0
-    std::vector<uint64_t> hostKeys(numOutgoing);
-    cudaMemcpy(hostKeys.data(),
-               pDestOut,
-               numOutgoing*sizeof(uint64_t),cudaMemcpyDefault);
-    RAFI_CUDA_SYNC_CHECK();
-    std::sort(hostKeys.begin(),hostKeys.end());
-    cudaMemcpy(pDestOut,
-               hostKeys.data(),
-               numOutgoing*sizeof(uint64_t),cudaMemcpyDefault);
-    RAFI_CUDA_SYNC_CHECK();
-#else
-    // uint64_t  *d_keys_in  = (uint64_t*)pDestOut;
-    unsigned  *d_keys_sorted = 0;
-    unsigned  *d_values_sorted = 0;
-    RAFI_CUDA_CALL(Malloc((void **)&d_keys_sorted,numOutgoing*sizeof(unsigned)));
-    RAFI_CUDA_CALL(Malloc((void **)&d_values_sorted,numOutgoing*sizeof(unsigned)));
-    // Determine temporary device storage requirements
-    void     *d_temp_storage = nullptr;
-    size_t   temp_storage_bytes = 0;
-    cub::DeviceRadixSort::SortPairs(d_temp_storage,
-                                    temp_storage_bytes,
-                                    pDestRank,
-                                    d_keys_sorted,
-                                    pDestRayID,
-                                    d_values_sorted,
-                                    (size_t)numOutgoing);
-    
-    // Allocate temporary storage
-    RAFI_CUDA_SYNC_CHECK();
-    RAFI_CUDA_CALL(Malloc(&d_temp_storage, temp_storage_bytes));
-    RAFI_CUDA_SYNC_CHECK();
-
     if (numOutgoing > 0) {
-    // Run sorting operation
-    cudaSetDevice(0);
-    cub::DeviceRadixSort::SortPairs(d_temp_storage,
-                                    temp_storage_bytes,
-                                    pDestRank,
-                                    d_keys_sorted,
-                                    pDestRayID,
-                                    d_values_sorted,
-                                    (size_t)numOutgoing);
-    RAFI_CUDA_SYNC_CHECK();
-    {
-      int bs = 1024;
-      int nb = divRoundUp(numOutgoing,bs);
-      if (nb)
-        checkDests<<<nb,bs>>>(2,d_keys_sorted,d_values_sorted,numOutgoing);
+      unsigned  *d_keys_sorted = 0;
+      unsigned  *d_values_sorted = 0;
+      RAFI_CUDA_CALL(Malloc((void **)&d_keys_sorted,numOutgoing*sizeof(unsigned)));
+      RAFI_CUDA_CALL(Malloc((void **)&d_values_sorted,numOutgoing*sizeof(unsigned)));
+      // Determine temporary device storage requirements
+      void     *d_temp_storage = nullptr;
+      size_t   temp_storage_bytes = 0;
+      cub::DeviceRadixSort::SortPairs(d_temp_storage,
+                                      temp_storage_bytes,
+                                      pDestRank,
+                                      d_keys_sorted,
+                                      pDestRayID,
+                                      d_values_sorted,
+                                      (size_t)numOutgoing);
+      
+      // Allocate temporary storage
+      RAFI_CUDA_CALL(Malloc(&d_temp_storage, temp_storage_bytes));
+      
+      cub::DeviceRadixSort::SortPairs(d_temp_storage,
+                                      temp_storage_bytes,
+                                      pDestRank,
+                                      d_keys_sorted,
+                                      pDestRayID,
+                                      d_values_sorted,
+                                      (size_t)numOutgoing);
+      RAFI_CUDA_CALL(Memcpy(pDestRayID,d_values_sorted,
+                            numOutgoing*sizeof(unsigned),
+                            cudaMemcpyDefault));
+      RAFI_CUDA_CALL(Memcpy(pDestRank,d_keys_sorted,
+                            numOutgoing*sizeof(unsigned),
+                            cudaMemcpyDefault));
       RAFI_CUDA_SYNC_CHECK();
+      RAFI_CUDA_CALL(Free(d_keys_sorted));
+      RAFI_CUDA_CALL(Free(d_values_sorted));
+      RAFI_CUDA_CALL(Free(d_temp_storage));
+
+    if (numOutgoing) {
+      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,-2);
+    }
+      // ------------------------------------------------------------------
+      // re-arrange rays
+      // ------------------------------------------------------------------
+      {
+        int bs = 1024;
+        int nb = divRoundUp(numOutgoing,bs);
+        if (nb)
+          rearrangeRays<<<nb,bs>>>(pRaysIn,pRaysOut,pDestRank,pDestRayID,
+                                   numOutgoing,mpi.rank);
+    
+      }
     }
     RAFI_CUDA_SYNC_CHECK();
     
-    RAFI_CUDA_SYNC_CHECK();
-    RAFI_CUDA_CALL(Memcpy(pDestRayID,d_values_sorted,numOutgoing*sizeof(unsigned),
-                          cudaMemcpyDefault));
-    RAFI_CUDA_CALL(Memcpy(pDestRank,d_keys_sorted,numOutgoing*sizeof(unsigned),
-                          cudaMemcpyDefault));
-    RAFI_CUDA_SYNC_CHECK();
-    RAFI_CUDA_CALL(Free(d_keys_sorted));
-    RAFI_CUDA_CALL(Free(d_values_sorted));
-    RAFI_CUDA_CALL(Free(d_temp_storage));
-    }
-#endif
-    RAFI_CUDA_SYNC_CHECK();
-    {
-      int bs = 1024;
-      int nb = divRoundUp(numOutgoing,bs);
-      if (nb)
-        checkDests<<<nb,bs>>>(3,pDestRank,pDestRayID,numOutgoing);
-      RAFI_CUDA_SYNC_CHECK();
-    }
-    RAFI_CUDA_SYNC_CHECK();
-
-    // ------------------------------------------------------------------
-    // re-arrange rays
-    // ------------------------------------------------------------------
-    {
-      int bs = 1024;
-      int nb = divRoundUp(numOutgoing,bs);
-      if (nb)
-        rearrangeRays<<<nb,bs>>>(pRaysIn,pRaysOut,pDestRank,pDestRayID,numOutgoing);
-    }
     std::swap(pRaysOut,pRaysIn);
-    RAFI_CUDA_SYNC_CHECK();
-    printf("rafi[%i] reordered rays for forwarding, count=%i\n",mpi.rank,numOutgoing);
-    if (numOutgoing > 0)
-      printDebugRays<<<divRoundUp(numOutgoing,1024),1024>>>
-        (mpi.rank,pRaysOut,numOutgoing);
-    RAFI_CUDA_SYNC_CHECK();
+    if (numOutgoing) {
+      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,-1);
+    }
     
     // ------------------------------------------------------------------
     // find where ray's offsets are, and use that to compute the
@@ -297,10 +277,8 @@ namespace rafi {
     // ------------------------------------------------------------------
     std::vector<int> begin(mpi.size);
     int *d_begin = 0;
-    RAFI_CUDA_SYNC_CHECK();
     RAFI_CUDA_CALL(Malloc((void **)&d_begin, mpi.size*sizeof(int)));
     RAFI_CUDA_CALL(Memset((void *)d_begin, -1, mpi.size*sizeof(int)));
-    RAFI_CUDA_SYNC_CHECK();
     {
       int bs = 1024;
       int nb = divRoundUp(numOutgoing,bs);
@@ -330,7 +308,7 @@ namespace rafi {
     std::vector<int> count(mpi.size);
     for (int i=0;i<mpi.size;i++)
       count[i] = end[i] - begin[i];
-    
+
     // ------------------------------------------------------------------
     // exchange ray counts
     // ------------------------------------------------------------------
@@ -353,35 +331,72 @@ namespace rafi {
       sendCounts[i] = numRaysWeAreSendingTo[i]*sizeof(ray_t);
       sendOffsets[i] = sendSum*sizeof(ray_t);
       sendSum += numRaysWeAreSendingTo[i];
-      // printf("send[%i] ofs %i cnt %i\n",i,sendOffsets[i],sendCounts[i]);
+      
+      if (sendCounts[i]) {
+        int bs = 1024;
+        int nb = divRoundUp(sendCounts[i],bs);
+        if (nb)
+          markRays<<<nb,bs>>>(pRaysOut+sendOffsets[i]/sizeof(ray_t),i,
+                              sendCounts[i]/sizeof(ray_t));
+      }
     }
+    
     int recvSum = 0;
     for (int i=0;i<mpi.size;i++) {
       recvCounts[i] = numRaysWeAreReceivingFrom[i]*sizeof(ray_t);
       recvOffsets[i] = recvSum*sizeof(ray_t);
       recvSum += numRaysWeAreReceivingFrom[i];
-      // printf("recv[%i] ofs %i cnt %i\n",i,recvOffsets[i],recvCounts[i]);
     }
+    cudaMemset(pRaysIn,-1,recvSum*sizeof(ray_t));
+    
+    std::stringstream ss;
+    ss << "[" << mpi.rank << "] send/recv: send";
+    for (int i=0;i<mpi.size;i++)
+      ss << " " << numRaysWeAreSendingTo[i];
+    ss << " ; recv";
+    for (int i=0;i<mpi.size;i++)
+      ss << " " << numRaysWeAreReceivingFrom[i];
+    ss << std::endl;
+    for (int i=0;i<mpi.size;i++) {
+      ss << " - {" << mpi.rank << "->" << i << "}: " << sendCounts[i] << "@" << sendOffsets[i] << std::endl;
+      ss << " - {" << mpi.rank << "<-" << i << "}: " << recvCounts[i] << "@" << recvOffsets[i] << std::endl;
+    }
+    std::cout << ss.str();
+
+
+    if (numOutgoing) {
+      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysOut,numOutgoing,mpi.rank,0);
+    }
+    
     RAFI_MPI_CALL(Alltoallv(pRaysOut,sendCounts.data(),sendOffsets.data(),MPI_BYTE,
                             pRaysIn,recvCounts.data(),recvOffsets.data(),MPI_BYTE,
                             mpi.comm));
+
+
+    for (int i=0;i<mpi.size;i++) {
+      if (recvCounts[i]) {
+        int bs = 1024;
+        int nb = divRoundUp(recvCounts[i],bs);
+        if (nb)
+          checkRays<<<nb,bs>>>(pRaysIn+recvOffsets[i]/sizeof(ray_t),i,mpi.rank,
+                               recvCounts[i]/sizeof(ray_t));
+      }
+    }
     
     // ------------------------------------------------------------------
     // swap queues
     // ------------------------------------------------------------------
-    std::swap(pRaysOut,pRaysIn);
-    numIncoming = numOutgoing;
+    // std::swap(pRaysOut,pRaysIn);
+    numIncoming = recvSum;//numOutgoing;
+    if (numOutgoing) {
+      printDBG<<<divRoundUp(numOutgoing,128),128>>>(pRaysIn,numIncoming,mpi.rank,1);
+    }
     RAFI_CUDA_CALL(Memset(pNumOutgoing,0,sizeof(int)));
 
-    printf("rafi[%i] doen forwarding, count=%i\n",mpi.rank,numOutgoing);
-    if (numOutgoing > 0)
-      printDebugRays<<<divRoundUp(numOutgoing,1024),1024>>>(mpi.rank,pRaysOut,numOutgoing);
-    RAFI_CUDA_SYNC_CHECK();
     // ------------------------------------------------------------------
     // cleanup
     // ------------------------------------------------------------------
     RAFI_CUDA_CALL(Free(d_begin));
-    RAFI_CUDA_SYNC_CHECK();
 
     result.numRaysInIncomingQueueThisRank = 0;
     for (int i=0;i<mpi.size;i++)
@@ -389,7 +404,9 @@ namespace rafi {
     RAFI_MPI_CALL(Allreduce(&result.numRaysInIncomingQueueThisRank,
                             &result.numRaysAliveAcrossAllRanks,
                             1,MPI_INT,MPI_SUM,mpi.comm));
-                  
+    PRINT(numIncoming);
+    PRINT(result.numRaysInIncomingQueueThisRank);
+    PRINT(result.numRaysAliveAcrossAllRanks);
     return result;
   }
   

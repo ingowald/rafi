@@ -21,12 +21,12 @@ namespace rafi {
       a valid mpi rank for the communicator being provided (though
       sending to itself is allowed */
     inline __device__
-    void emitOutgoing(ray_t ray, int destination, bool dbg=false) const;
+    void emitOutgoing(ray_t ray, int destination) const;
 
     inline __device__
     int allocateOutgoing(int numRaysToAllocate) const;
     inline __device__
-    void writeOutgoing(int rayID, ray_t ray, int destination, bool dbg) const;
+    void writeOutgoing(int rayID, ray_t ray, int destination) const;
 
     struct {
       int rank;
@@ -65,6 +65,13 @@ namespace rafi {
       node. app guarantees that no ray will ever generate or receive
       more rays than indicates in this function */
     virtual void resizeRayQueues(size_t maxRaysOnAnyRankAtAnyTime) = 0;
+
+    /*! explicitly clear the device-side 'numOutgoing' ray counter
+        that indicates the numnber of active rays in the ray
+        queue. this usually happens automatically at the end of
+        forwardrays (so _usually_ doesn't ever have to get called),
+        but this allows for resetting the queue even if one decides to
+        _not_ forward rays */
     virtual void clearQueue() = 0;
 
     /*! forward current set of (one-per-rank) outgoing ray queues,
@@ -77,7 +84,7 @@ namespace rafi {
       in this forwarding operation AND the total number of rays
       currently in flight ACROSS ALL RANKS (which can be used for
       distributed termination). */
-    virtual ForwardResult forwardRays(const char *dbg) = 0;
+    virtual ForwardResult forwardRays() = 0;
 
     struct {
       int rank = -1;
@@ -110,7 +117,9 @@ namespace rafi {
   inline __device__
   ray_t DeviceInterface<ray_t>::getIncoming(int rayID) const
   {
-    return pRaysIn[rayID];
+    auto ray = pRaysIn[rayID];
+    if (ray.dbg) printf("(%i) get dbg ray at %i\n",mpi.rank,rayID);
+    return ray;
   }
   
   template<typename ray_t>
@@ -123,41 +132,21 @@ namespace rafi {
   template<typename ray_t>
   inline __device__
   void DeviceInterface<ray_t>::emitOutgoing(const ray_t ray,
-                                            int rankThisNeedsToGetSentTo,
-                                            bool dbg) const
+                                            int rankThisNeedsToGetSentTo) const
   {
-    if (rankThisNeedsToGetSentTo != 0 && rankThisNeedsToGetSentTo != 1)
-      printf("rankThisNeedsToGetSentTo %i\n",rankThisNeedsToGetSentTo);
-
     int pos = allocateOutgoing(1);
-    if (dbg) { printf("emitting ray to pos %i\n",pos); }
-    writeOutgoing(pos,ray,rankThisNeedsToGetSentTo,dbg);
+    writeOutgoing(pos,ray,rankThisNeedsToGetSentTo);
   }
 
   template<typename ray_t>
   inline __device__
   void DeviceInterface<ray_t>::writeOutgoing(int rayID,
                                              ray_t ray,
-                                             int destination,
-                                             bool dbg) const
+                                             int destination) const
   {
-    if (rayID == 0) printf("maxout %i\n",maxNumOutgoing);
-    if (destination != 0 && destination != 1)
-      printf("writeout dest %i\n",destination);
-    if (rayID >= maxNumOutgoing) {
-      printf("queue overflow %i/%i\n",rayID,maxNumOutgoing);
-      return;
-    }
     pRaysOut[rayID] = ray;
     pDestRayID[rayID] = rayID;
     pDestRank[rayID] = destination;
-    if (dbg) {
-      printf("write out pos %i, dest rank %i ID %i\n",
-             rayID,
-             pDestRank[rayID],
-             pDestRayID[rayID]
-             );
-    }
   }
   
 #endif
