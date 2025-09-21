@@ -43,7 +43,8 @@ namespace rafi {
       is a error and will return null */
     int maxNumOutgoing;
 
-    int2  *pDestOut;
+    unsigned  *pDestRank;
+    unsigned  *pDestRayID;
     ray_t *pRaysOut;
     ray_t *pRaysIn;
   };
@@ -64,6 +65,7 @@ namespace rafi {
       node. app guarantees that no ray will ever generate or receive
       more rays than indicates in this function */
     virtual void resizeRayQueues(size_t maxRaysOnAnyRankAtAnyTime) = 0;
+    virtual void clearQueue() = 0;
 
     /*! forward current set of (one-per-rank) outgoing ray queues,
       such that each ray ends up in the incoming ray queue on the
@@ -147,13 +149,13 @@ namespace rafi {
       return;
     }
     pRaysOut[rayID] = ray;
-    pDestOut[rayID] = make_int2(rayID,destination);
+    pDestRayID[rayID] = rayID;
+    pDestRank[rayID] = destination;
     if (dbg) {
-      printf("write out pos %i, dest %i %i %lx\n",
+      printf("write out pos %i, dest rank %i ID %i\n",
              rayID,
-             pDestOut[rayID].x,
-             pDestOut[rayID].y,
-             ((uint64_t*)pDestOut)[rayID]
+             pDestRank[rayID],
+             pDestRayID[rayID]
              );
     }
   }
